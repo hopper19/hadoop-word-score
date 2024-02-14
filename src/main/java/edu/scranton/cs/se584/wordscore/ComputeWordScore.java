@@ -4,11 +4,14 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.StringTokenizer;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
@@ -16,10 +19,10 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
-import org.apache.hadoop.mapreduce.lib.map.InverseMapper;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
-import org.apache.hadoop.mapreduce.lib.reduce.LongSumReducer;
+import org.apache.hadoop.mapreduce.lib.map.InverseMapper;
+import org.apache.hadoop.mapreduce.lib.reduce.IntSumReducer;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.json.simple.JSONObject;
@@ -63,18 +66,35 @@ public class ComputeWordScore extends Configured implements Tool {
    *  ".word" is a unique word from the collection of all text reviews.
    *  ".score_modifier" is the modifier value corresponding to the star value of
    *    the review in which the text appears.
+   * 
+   * To optimize for efficiency, IntWritable is used for output value instead
+   * of LongWritable. With roughly seven million reviews, it is unlikely that
+   * any word score would reach the bounds of integer range.
    */
-  public static class ComputeWordScoreMapper extends Mapper<LongWritable, Text, Text, LongWritable> {
+  public static class ComputeWordScoreMapper extends Mapper<LongWritable, Text, Text, IntWritable> {
 
-    // Lookup table for score modifiers according to the star value. Shared across calls to map().
-    private static final Map<Integer, LongWritable> SCORE_MODIFIERS = new HashMap<>();
-    static {  // Ensure that this code block initializes HashMap, and only execute once.
-      SCORE_MODIFIERS.put(5, new LongWritable(2));
-      SCORE_MODIFIERS.put(4, new LongWritable(1));
-      SCORE_MODIFIERS.put(3, new LongWritable(0));
-      SCORE_MODIFIERS.put(2, new LongWritable(-1));
-      SCORE_MODIFIERS.put(1, new LongWritable(-2));
-    }
+    /*
+     * Lookup table for score modifiers according to the star value. Shared across
+     * calls to map().
+     * 
+     * Initially, I created five static IntWritable objects and use if statements
+     * in the map() method to retrieve the appropriate IntWritable. My next idea
+     * was, within map(), to perform the calculation for score, then create the
+     * IntWritable. Both ideas are obviously much less efficient than the one below.
+     */
+    // private static final Map<Integer, IntWritable> SCORE_MODIFIERS = new HashMap<>();
+    // static {  // Ensure that this code block initializes HashMap, and only execute once.
+    //   SCORE_MODIFIERS.put(5, new IntWritable(2));
+    //   SCORE_MODIFIERS.put(4, new IntWritable(1));
+    //   SCORE_MODIFIERS.put(3, new IntWritable(0));
+    //   SCORE_MODIFIERS.put(2, new IntWritable(-1));
+    //   SCORE_MODIFIERS.put(1, new IntWritable(-2));
+    // }
+    private static final IntWritable PLUS_TWO = new IntWritable(2);
+    private static final IntWritable PLUS_ONE = new IntWritable(1);
+    private static final IntWritable ZERO = new IntWritable(0);
+    private static final IntWritable MINUS_ONE = new IntWritable(-1);
+    private static final IntWritable MINUS_TWO = new IntWritable(-2);
 
     // Non-constant Writable. Must not be shared across Mapper instances.
     private final Text word = new Text();
@@ -94,7 +114,25 @@ public class ComputeWordScore extends Configured implements Tool {
     @Override
     protected void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
       final JSONObject review = parse(value.toString());
-      final LongWritable scoreModifier = SCORE_MODIFIERS.get(((Number) review.get("stars")).intValue());
+      // final IntWritable scoreModifier = SCORE_MODIFIERS.get(((Number) review.get("stars")).intValue());
+      final IntWritable scoreModifier;
+      switch (((Number) review.get("stars")).intValue()) {
+        case 5:
+          scoreModifier = PLUS_TWO;
+          break;
+        case 4:
+          scoreModifier = PLUS_ONE;
+          break;
+        case 2:
+          scoreModifier = MINUS_ONE;
+          break;
+        case 1:
+          scoreModifier = MINUS_TWO;
+          break;
+        default:
+          scoreModifier = ZERO;
+          break;
+      }
 
       // Iterator Reference: WordCount.java Hadoop Example
       StringTokenizer itr = new StringTokenizer(review.get("text").toString());
@@ -102,6 +140,13 @@ public class ComputeWordScore extends Configured implements Tool {
         word.set(itr.nextToken());
         context.write(word, scoreModifier);
       }
+    }
+  }
+
+  public static class IntWritableDecreasingComparator extends IntWritable.Comparator {
+    @Override
+    public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
+      return super.compare(b2, s2, l2, b1, s1, l1);
     }
   }
 
@@ -113,10 +158,25 @@ public class ComputeWordScore extends Configured implements Tool {
     }
     
     final Configuration conf = getConf();
+
     final Path inputPath = new Path(arguments[0]);
     final Path outputPath = new Path(arguments[1]);
-    final Path intermediatePath = new Path(outputPath, "intermediate");
-    final Path finalPath = new Path(outputPath, "final");
+
+    /*
+     * There were a few ideas for the location of the intermediate output directory.
+     * Initially, this directory was set to be in the same directory in which the
+     * the JAR is executed. The inconvenience here is that each time this same
+     * JAR is executed, there are two directories to be manually deleted. Then, I decided to 
+     * go with the idea of generating a unique directory name each time. Random
+     * UUID was my initial solution. However, in case I need to view the intermediate
+     * output, random names prove cumbersome. So, appending the current the current
+     * time to the directory name turns out to be a lot more meaningful.Finally,
+     * all intermediate directories are created under tmp to delegat the cleanup task to the OS.
+     */
+    LocalDateTime dateTime = LocalDateTime.now();
+    DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    String dataTimeString = dateTime.format(dateTimeFormatter);
+    final Path intermediatePath = new Path("/tmp/wordscore_nguyenc8_" + dataTimeString);
 
     final Job scorer = Job.getInstance(conf, "Compute Word Score");
     scorer.setJarByClass(ComputeWordScore.class);
@@ -132,12 +192,12 @@ public class ComputeWordScore extends Configured implements Tool {
     FileOutputFormat.setOutputPath(scorer, intermediatePath);
 
     scorer.setMapperClass(ComputeWordScoreMapper.class);
-    scorer.setReducerClass(LongSumReducer.class);
+    scorer.setReducerClass(IntSumReducer.class);
     // Adding a combiner GREATLY reduces I/O access
-    scorer.setCombinerClass(LongSumReducer.class);
+    scorer.setCombinerClass(IntSumReducer.class);
 
     scorer.setOutputKeyClass(Text.class);
-    scorer.setOutputValueClass(LongWritable.class);
+    scorer.setOutputValueClass(IntWritable.class);
 
 
     final Job sorter = Job.getInstance(conf, "Sort Word Score");
@@ -146,21 +206,25 @@ public class ComputeWordScore extends Configured implements Tool {
     sorter.setInputFormatClass(SequenceFileInputFormat.class);
     FileInputFormat.addInputPath(sorter, intermediatePath);
     sorter.setOutputFormatClass(TextOutputFormat.class);
-    FileOutputFormat.setOutputPath(sorter, finalPath);
+    FileOutputFormat.setOutputPath(sorter, outputPath);
 
     /*
      * Initially, I wrote my own mapper to swap and sort the scores, but I
      * found out that Hadoop has built-in tools to achieve the same result.
      * 
      * A quick lookup of "descending" and "decreasing" in the Hadoop source code
-     * reveals the DecreasingComparator class
+     * reveals the DecreasingComparator class. However, this class only works with
+     * LongWritable. Instead of modifying my program to use LongWrite, in the interest
+     * of efficiency, I implemented my own DecreasingComparator for IntWritable.
      * 
      * InverseMapper is one of the Direct Known Subclasses of Mapper in the docs
      */
-    sorter.setSortComparatorClass(LongWritable.DecreasingComparator.class);
+    sorter.setSortComparatorClass(IntWritableDecreasingComparator.class);
     sorter.setMapperClass(InverseMapper.class);
+    // Prevent user from specifying ZERO reduce task
+    sorter.setNumReduceTasks(1);
 
-    sorter.setOutputKeyClass(LongWritable.class);
+    sorter.setOutputKeyClass(IntWritable.class);
     sorter.setOutputValueClass(Text.class);
 
     return (scorer.waitForCompletion(true) && sorter.waitForCompletion(true)) ? 0 : 1;
