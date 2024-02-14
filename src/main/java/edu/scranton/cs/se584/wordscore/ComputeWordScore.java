@@ -81,20 +81,16 @@ public class ComputeWordScore extends Configured implements Tool {
      * in the map() method to retrieve the appropriate IntWritable. My next idea
      * was, within map(), to perform the calculation for score, then create the
      * IntWritable. Both ideas are obviously much less efficient than the one below.
+     * UPDATE: switch/if may be faster for few entries. Need more testing.
      */
-    // private static final Map<Integer, IntWritable> SCORE_MODIFIERS = new HashMap<>();
-    // static {  // Ensure that this code block initializes HashMap, and only execute once.
-    //   SCORE_MODIFIERS.put(5, new IntWritable(2));
-    //   SCORE_MODIFIERS.put(4, new IntWritable(1));
-    //   SCORE_MODIFIERS.put(3, new IntWritable(0));
-    //   SCORE_MODIFIERS.put(2, new IntWritable(-1));
-    //   SCORE_MODIFIERS.put(1, new IntWritable(-2));
-    // }
-    private static final IntWritable PLUS_TWO = new IntWritable(2);
-    private static final IntWritable PLUS_ONE = new IntWritable(1);
-    private static final IntWritable ZERO = new IntWritable(0);
-    private static final IntWritable MINUS_ONE = new IntWritable(-1);
-    private static final IntWritable MINUS_TWO = new IntWritable(-2);
+    private static final Map<Integer, IntWritable> SCORE_MODIFIERS = new HashMap<>();
+    static {  // Ensure that this code block initializes HashMap, and only execute once.
+      SCORE_MODIFIERS.put(5, new IntWritable(2));
+      SCORE_MODIFIERS.put(4, new IntWritable(1));
+      SCORE_MODIFIERS.put(3, new IntWritable(0));
+      SCORE_MODIFIERS.put(2, new IntWritable(-1));
+      SCORE_MODIFIERS.put(1, new IntWritable(-2));
+    }
 
     // Non-constant Writable. Must not be shared across Mapper instances.
     private final Text word = new Text();
@@ -114,25 +110,7 @@ public class ComputeWordScore extends Configured implements Tool {
     @Override
     protected void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
       final JSONObject review = parse(value.toString());
-      // final IntWritable scoreModifier = SCORE_MODIFIERS.get(((Number) review.get("stars")).intValue());
-      final IntWritable scoreModifier;
-      switch (((Number) review.get("stars")).intValue()) {
-        case 5:
-          scoreModifier = PLUS_TWO;
-          break;
-        case 4:
-          scoreModifier = PLUS_ONE;
-          break;
-        case 2:
-          scoreModifier = MINUS_ONE;
-          break;
-        case 1:
-          scoreModifier = MINUS_TWO;
-          break;
-        default:
-          scoreModifier = ZERO;
-          break;
-      }
+      final IntWritable scoreModifier = SCORE_MODIFIERS.get(((Number) review.get("stars")).intValue());
 
       // Iterator Reference: WordCount.java Hadoop Example
       StringTokenizer itr = new StringTokenizer(review.get("text").toString());
