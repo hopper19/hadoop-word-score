@@ -121,6 +121,12 @@ public class ComputeWordScore extends Configured implements Tool {
     }
   }
 
+  /**
+   * Decreasing comparator optimized for IntWritable
+   * References:  LongWritable.Comparator.class
+   *              LongWritable.DecreasingComparator.class
+   *              IntWritable.Comparator.class
+   */
   public static class IntWritableDecreasingComparator extends IntWritable.Comparator {
     @Override
     public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
@@ -199,7 +205,11 @@ public class ComputeWordScore extends Configured implements Tool {
      */
     sorter.setSortComparatorClass(IntWritableDecreasingComparator.class);
     sorter.setMapperClass(InverseMapper.class);
-    // Prevent user from specifying ZERO reduce task
+    /*
+     * Prevent user from specifying ZERO reduce task.
+     * Assignment requirement also necessitates the output to be contained
+     * within a single file
+     */
     sorter.setNumReduceTasks(1);
 
     sorter.setOutputKeyClass(IntWritable.class);
